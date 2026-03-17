@@ -16,25 +16,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
-# Workaround: Try importing plotly, if not installed, show Streamlit error and stop app
-try:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-except ModuleNotFoundError as e:
-    st.error(
-        """
-        <span style='color:#e57373; font-size: 1.2rem; font-weight:600'>
-        🚫 Required Python package <code>plotly</code> is not installed.
-        </span><br>
-        <span style='color:#bdbdbd; font-size:1rem'>
-        Please ensure your environment includes <code>plotly</code>.<br>
-        You can install it via:<br>
-        <code>pip install plotly</code>
-        </span>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.stop()
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 import statsmodels.api as sm
 from statsmodels.stats.stattools import durbin_watson
