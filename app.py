@@ -7,6 +7,8 @@ from __future__ import annotations
 import warnings
 import time
 import itertools
+import io
+import sys
 
 warnings.filterwarnings("ignore")
 
@@ -14,7 +16,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 import statsmodels.api as sm
 from statsmodels.stats.stattools import durbin_watson
@@ -25,7 +26,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 import yfinance as yf
 
-# ── Import data & config from mini-project ──────────────────────────────────
 from importlib.machinery import SourceFileLoader
 
 _mp = SourceFileLoader("mini_project", "mini-project.py").load_module()
@@ -35,833 +35,658 @@ UNIVERSE = _mp.UNIVERSE
 ALL_TICKERS = _mp.ALL_TICKERS
 START_DATE = _mp.START_DATE
 END_DATE = _mp.END_DATE
+TARGET_R2 = _mp.TARGET_R2
+MAX_FACTORS = _mp.MAX_FACTORS
+P_THRESHOLD = _mp.P_THRESHOLD
 
-# ── Utility functions ────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def sharpe(r):
     return r.mean() / r.std() * np.sqrt(12)
 
+
 def ann_ret(r):
     return (1 + r.mean()) ** 12 - 1
 
+
 def ann_vol(r):
     return r.std() * np.sqrt(12)
+
 
 def max_dd(r):
     cum = (1 + r).cumprod()
     return ((cum - cum.cummax()) / cum.cummax()).min()
 
 
+DARK = dict(
+    template="plotly_dark",
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(10,10,25,0.9)",
+)
+
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="HF Clone — Aberdeen Orbita",
-    page_icon="",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
-# ── Custom CSS ───────────────────────────────────────────────────────────────
-st.markdown("""
+st.markdown(
+    """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
-    .main .block-container {
-        padding-top: 2rem;
-        max-width: 1400px;
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap');
+    .main .block-container { padding-top: 1.5rem; max-width: 1500px; }
+    h1, h2, h3 { font-family: 'Inter', sans-serif; }
+    .terminal {
+        background: #0c0c0c;
+        color: #00ff41;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.78rem;
+        padding: 20px 24px;
+        border-radius: 12px;
+        border: 1px solid #1a3a1a;
+        max-height: 520px;
+        overflow-y: auto;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        box-shadow: 0 0 30px rgba(0,255,65,0.05);
     }
-
-    h1, h2, h3 {
-        font-family: 'Inter', sans-serif;
-    }
-
-    .metric-card {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        border-radius: 16px;
-        padding: 24px;
-        color: white;
+    .terminal .dim { color: #4a7a4a; }
+    .terminal .cyan { color: #4fc3f7; }
+    .terminal .yellow { color: #ffb74d; }
+    .terminal .red { color: #e57373; }
+    .terminal .bold { font-weight: 700; }
+    .terminal .white { color: #e0e0e0; }
+    .kpi {
+        background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 20px;
         text-align: center;
-        border: 1px solid rgba(255,255,255,0.08);
-        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
     }
-
-    .metric-card .value {
-        font-size: 2.4rem;
+    .kpi .val {
+        font-size: 2rem;
         font-weight: 700;
         font-family: 'Inter', sans-serif;
         line-height: 1.1;
     }
-
-    .metric-card .label {
-        font-size: 0.85rem;
-        opacity: 0.7;
-        margin-top: 6px;
+    .kpi .lbl {
+        font-size: 0.75rem;
+        opacity: 0.5;
+        margin-top: 4px;
         text-transform: uppercase;
         letter-spacing: 1px;
     }
-
-    .phase-badge {
-        display: inline-block;
-        padding: 4px 14px;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        letter-spacing: 0.5px;
-    }
-
-    .phase-1 { background: #0d47a1; color: white; }
-    .phase-2 { background: #e65100; color: white; }
-    .phase-3 { background: #1b5e20; color: white; }
-
-    div[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f0f23 0%, #1a1a3e 100%);
-    }
-
-    div[data-testid="stSidebar"] .stMarkdown {
-        color: #e0e0e0;
-    }
-
-    .highlight-box {
-        background: linear-gradient(135deg, #0a1628 0%, #1a2744 100%);
-        border-left: 4px solid #4fc3f7;
-        padding: 16px 20px;
-        border-radius: 0 12px 12px 0;
-        margin: 12px 0;
-        color: #e0e0e0;
-    }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## Configuration")
-    st.markdown("---")
+# ── Run analysis (cached) ───────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def run_analysis():
+    """Run the full clone pipeline. Returns results dict + log lines."""
+    log = []
 
-    target_r2 = st.slider(
-        "Target R\u00b2 adjusted", 0.10, 0.70, 0.45, 0.05,
-        help="Minimum R\u00b2 adjusted for the stepwise to stop"
+    def p(msg):
+        log.append(msg)
+
+    p("=" * 72)
+    p("  HEDGE FUND CLONE ENGINE")
+    p("  Aberdeen Orbita Capital Return Strategy Ltd A (GBP)")
+    p("=" * 72)
+    p(f"  Period        : {START_DATE} -> {END_DATE}")
+    p(f"  Target R2adj  : {TARGET_R2 * 100:.0f}%")
+    p(f"  Max factors   : {MAX_FACTORS}")
+    p(f"  P-threshold   : {P_THRESHOLD}")
+    p(
+        f"  Universe      : {len(ALL_TICKERS)} tickers across {len(UNIVERSE)} asset classes"
     )
-    max_factors = st.slider("Max factors", 5, 30, 25)
-    p_threshold = st.slider("P-value threshold", 0.05, 0.30, 0.25, 0.05)
-    dedup_corr = st.slider("Dedup correlation", 0.70, 0.95, 0.85, 0.05,
-                           help="Remove features with pairwise correlation above this")
+    p("")
 
-    st.markdown("---")
-    st.markdown("### Asset Universe")
-    selected_classes = st.multiselect(
-        "Asset classes",
-        list(UNIVERSE.keys()),
-        default=list(UNIVERSE.keys()),
+    # ── Download ─────────────────────────────────────────────────────────
+    p("-" * 72)
+    p(f"  [1/6] Downloading {len(ALL_TICKERS)} tickers from Yahoo Finance...")
+    p("-" * 72)
+
+    all_prices = []
+    failed = []
+    batch_size = 30
+    for i in range(0, len(ALL_TICKERS), batch_size):
+        batch = ALL_TICKERS[i : i + batch_size]
+        batch_num = i // batch_size + 1
+        p(f"    Batch {batch_num}: {len(batch)} tickers...")
+        try:
+            raw = yf.download(
+                batch,
+                start=START_DATE,
+                end=END_DATE,
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+            if isinstance(raw.columns, pd.MultiIndex):
+                close = raw["Close"]
+            else:
+                close = raw[["Close"]] if "Close" in raw.columns else raw
+            all_prices.append(close)
+        except Exception as e:
+            p(f"    WARNING: Batch failed - {e}")
+            failed.extend(batch)
+        time.sleep(0.3)
+
+    prices_daily = pd.concat(all_prices, axis=1)
+    prices_daily = prices_daily.loc[:, ~prices_daily.columns.duplicated()]
+    prices_monthly = prices_daily.resample("ME").last()
+    returns_monthly = prices_monthly.pct_change().dropna(how="all")
+    threshold = int(0.80 * len(returns_monthly))
+    returns_monthly = returns_monthly.dropna(axis=1, thresh=threshold)
+
+    p(
+        f"    OK: {returns_monthly.shape[1]} assets loaded | {len(failed)} failed | {returns_monthly.shape[0]} months"
+    )
+    p("")
+
+    # ── Align ────────────────────────────────────────────────────────────
+    p("-" * 72)
+    p("  [2/6] Aligning Aberdeen returns with market data...")
+    p("-" * 72)
+
+    target_dates = returns_monthly.index
+    n_align = min(len(ABERDEEN_MONTHLY), len(target_dates))
+    y = pd.Series(
+        ABERDEEN_MONTHLY[-n_align:], index=target_dates[-n_align:], name="Aberdeen"
+    )
+    X_raw = returns_monthly.loc[y.index].copy()
+    X_raw = X_raw.dropna(axis=1, thresh=int(0.90 * len(y)))
+    X_raw = X_raw.fillna(X_raw.median())
+
+    p(f"    Aberdeen : {len(y)} obs ({y.index[0].date()} -> {y.index[-1].date()})")
+    p(f"    Factors  : {X_raw.shape[1]} ETF/indices")
+    p(
+        f"    Ann. Return : {ann_ret(y) * 100:.2f}%  |  Sharpe : {sharpe(y):.2f}  |  MaxDD : {max_dd(y) * 100:.2f}%"
+    )
+    p("")
+
+    # ── Correlations ─────────────────────────────────────────────────────
+    corr_raw = X_raw.corrwith(y).abs().sort_values(ascending=False)
+    p("-" * 72)
+    p("  [3/6] Top 10 raw correlations with fund:")
+    p("-" * 72)
+    for ticker, corr_val in corr_raw.head(10).items():
+        bar = "#" * int(corr_val * 80)
+        p(f"    {ticker:<8} {corr_val:.4f}  {bar}")
+    p("")
+
+    # ── Feature engineering ──────────────────────────────────────────────
+    p("-" * 72)
+    p("  [4/6] Feature engineering...")
+    p("-" * 72)
+
+    X_enrich = X_raw.copy()
+    for col in X_raw.columns:
+        X_enrich[f"{col}_lag1"] = X_raw[col].shift(1)
+        X_enrich[f"{col}_lag2"] = X_raw[col].shift(2)
+    for col in corr_raw.head(25).index:
+        X_enrich[f"{col}_ma3"] = X_raw[col].rolling(3).mean()
+        X_enrich[f"{col}_ma6"] = X_raw[col].rolling(6).mean()
+    for col in corr_raw.head(15).index:
+        X_enrich[f"{col}_vol3"] = X_raw[col].rolling(3).std()
+    for col in corr_raw.head(25).index:
+        X_enrich[f"{col}_sq"] = X_raw[col] ** 2
+    top_interact = corr_raw.head(12).index.tolist()
+    for a, b in itertools.combinations(top_interact, 2):
+        X_enrich[f"{a}x{b}"] = X_raw[a] * X_raw[b]
+
+    X_enrich = X_enrich.dropna()
+    y_enrich = y.loc[X_enrich.index]
+    n_before = X_enrich.shape[1]
+
+    # Dedup
+    corr_matrix = X_enrich.corr().abs()
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+    to_drop = set()
+    for col in upper.columns:
+        highly_corr = upper.index[upper[col] > 0.85].tolist()
+        if highly_corr:
+            candidates = [col] + highly_corr
+            corrs_y = {
+                c: abs(X_enrich[c].corr(y_enrich))
+                for c in candidates
+                if c not in to_drop
+            }
+            if corrs_y:
+                keep = max(corrs_y, key=corrs_y.get)
+                to_drop.update(c for c in candidates if c != keep)
+    X_enrich = X_enrich.drop(columns=list(to_drop))
+
+    # PCA
+    scaler_pca = StandardScaler()
+    X_sc = scaler_pca.fit_transform(X_enrich)
+    n_comp = min(30, X_enrich.shape[1], X_enrich.shape[0] - 1)
+    pca_obj = PCA(n_components=n_comp)
+    pca_scores = pca_obj.fit_transform(X_sc)
+    for i in range(n_comp):
+        X_enrich[f"PC{i + 1}"] = pca_scores[:, i]
+
+    p(f"    Raw features     : {n_before}")
+    p(f"    After dedup      : {X_enrich.shape[1] - n_comp}")
+    p(f"    + PCA components : {n_comp}")
+    p(f"    Total candidates : {X_enrich.shape[1]}")
+    p(f"    Observations     : {len(y_enrich)}")
+    p("")
+
+    # ── Forward stepwise ─────────────────────────────────────────────────
+    p("-" * 72)
+    p(f"  [5/6] Forward stepwise (target R2adj >= {TARGET_R2 * 100:.0f}%)")
+    p("-" * 72)
+    p(f"  {'Step':<6} {'Factor':<28} {'R2adj':>8}  {'p-value':>10}")
+    p(
+        f"  {'----':<6} {'----------------------------':<28} {'--------':>8}  {'----------':>10}"
     )
 
-    st.markdown("---")
-    st.markdown(
-        '<div style="text-align:center; opacity:0.5; font-size:0.75rem;">'
-        'Hedge Fund Clone Engine<br>Built with Streamlit & Plotly'
-        '</div>',
-        unsafe_allow_html=True,
-    )
+    remaining = list(X_enrich.columns)
+    selected = []
+    best_r2 = 0.0
+    history = []
 
-run_button = st.sidebar.button("Run Clone Analysis", type="primary", use_container_width=True)
+    for step in range(MAX_FACTORS):
+        best_new = None
+        best_new_r2 = best_r2
+        best_p = 1.0
+        for cand in remaining:
+            try:
+                res = sm.OLS(
+                    y_enrich, sm.add_constant(X_enrich[selected + [cand]])
+                ).fit()
+                pval = float(res.pvalues.get(cand, 1.0))
+                if res.rsquared_adj > best_new_r2 and pval < P_THRESHOLD:
+                    best_new_r2 = res.rsquared_adj
+                    best_new = cand
+                    best_p = pval
+            except Exception:
+                continue
+        if best_new is None:
+            p(f"  -> Stopped: no significant factor found")
+            break
+        selected.append(best_new)
+        remaining.remove(best_new)
+        best_r2 = best_new_r2
+        hit = " TARGET HIT" if best_r2 >= TARGET_R2 else ""
+        p(f"  {step + 1:<6} {best_new:<28} {best_r2:>8.4f}  {best_p:>10.6f}{hit}")
+        history.append(
+            {
+                "step": step + 1,
+                "factor": best_new,
+                "r2_adj": best_new_r2,
+                "p_value": best_p,
+            }
+        )
+        if best_r2 >= TARGET_R2:
+            break
+
+    p("")
+
+    # ── Final model ──────────────────────────────────────────────────────
+    p("-" * 72)
+    p("  [6/6] Final OLS model & diagnostics")
+    p("-" * 72)
+
+    X_final = sm.add_constant(X_enrich[selected])
+    model = sm.OLS(y_enrich, X_final).fit()
+    y_hat = model.fittedvalues.rename("Clone")
+    resid = model.resid
+
+    dw = durbin_watson(resid)
+    _, bp_p, _, _ = het_breuschpagan(resid, X_final)
+    jb_stat, jb_p = stats.jarque_bera(resid)
+    vif_vals = [
+        variance_inflation_factor(X_final.values, i) for i in range(X_final.shape[1])
+    ]
+    vif_df = pd.DataFrame({"Variable": X_final.columns, "VIF": vif_vals})
+    vif_df = vif_df[vif_df["Variable"] != "const"]
+
+    params = model.params.drop("const")
+    weights = params / params.abs().sum() * 100
+    alpha_m = model.params["const"]
+
+    p(f"    R2           : {model.rsquared * 100:.2f}%")
+    p(f"    R2 adjusted  : {model.rsquared_adj * 100:.2f}%")
+    p(f"    F-stat       : {model.fvalue:.4f}  (p = {model.f_pvalue:.2e})")
+    p(f"    RMSE         : {np.sqrt(np.mean(resid**2)):.6f}")
+    p(f"    Factors      : {len(selected)}")
+    p(f"    Alpha (ann.) : {((1 + alpha_m) ** 12 - 1) * 100:.2f}%")
+    p("")
+    p(f"    Durbin-Watson   : {dw:.4f}  {'OK' if 1.5 < dw < 2.5 else 'WARNING'}")
+    p(f"    Breusch-Pagan p : {bp_p:.4f}  {'OK' if bp_p > 0.05 else 'WARNING'}")
+    p(f"    Jarque-Bera p   : {jb_p:.4f}  {'OK' if jb_p > 0.05 else 'WARNING'}")
+    p("")
+
+    n_ok = (vif_df["VIF"] < 5).sum()
+    p(f"    VIF: {n_ok}/{len(vif_df)} factors < 5 (no multicollinearity)")
+    p("")
+    p("=" * 72)
+    p(f"  COMPLETE | R2adj = {model.rsquared_adj * 100:.2f}% | {len(selected)} factors")
+    p("=" * 72)
+
+    return {
+        "y": y_enrich,
+        "y_hat": y_hat,
+        "model": model,
+        "selected": selected,
+        "history": pd.DataFrame(history),
+        "corr_raw": corr_raw,
+        "params": params,
+        "weights": weights,
+        "resid": resid,
+        "dw": dw,
+        "bp_p": bp_p,
+        "jb_p": jb_p,
+        "vif_df": vif_df,
+        "log": log,
+    }
 
 
 # ── Header ───────────────────────────────────────────────────────────────────
 st.markdown(
-    '<h1 style="text-align:center; font-family: Inter, sans-serif; '
-    'font-weight:700; letter-spacing:-1px;">'
-    'Hedge Fund Clone Engine'
-    '</h1>',
-    unsafe_allow_html=True,
-)
-st.markdown(
-    '<p style="text-align:center; opacity:0.6; margin-top:-10px; font-size:1.1rem;">'
-    'Aberdeen Orbita Capital Return Strategy Ltd A (GBP) &mdash; '
-    f'{START_DATE} to {END_DATE}'
-    '</p>',
+    '<h1 style="text-align:center; font-weight:700; letter-spacing:-1px; margin-bottom:0;">'
+    "Hedge Fund Clone Engine</h1>"
+    '<p style="text-align:center; opacity:0.5; margin-top:0; font-size:1rem;">'
+    f"Aberdeen Orbita Capital Return Strategy Ltd A (GBP) &mdash; {START_DATE} to {END_DATE}</p>",
     unsafe_allow_html=True,
 )
 
+# ── Run ──────────────────────────────────────────────────────────────────────
+with st.spinner("Running clone analysis..."):
+    R = run_analysis()
 
-# ── Main logic ───────────────────────────────────────────────────────────────
-if run_button or "results" in st.session_state:
+y, y_hat, model = R["y"], R["y_hat"], R["model"]
+selected, hist_df = R["selected"], R["history"]
+params, weights = R["params"], R["weights"]
+resid, corr_raw = R["resid"], R["corr_raw"]
 
-    if run_button:
-        # Build ticker list from selected classes
-        tickers = [t for cls in selected_classes for t in UNIVERSE.get(cls, [])]
+# ── Terminal output ──────────────────────────────────────────────────────────
+with st.expander("Algorithm Log", expanded=True):
+    terminal_html = "\n".join(R["log"])
+    st.markdown(f'<div class="terminal">{terminal_html}</div>', unsafe_allow_html=True)
 
-        with st.status("Running clone analysis...", expanded=True) as status:
+# ── KPI row ──────────────────────────────────────────────────────────────────
+st.markdown("---")
 
-            # ── Download ─────────────────────────────────────────────────────
-            st.write("Downloading ETF data from Yahoo Finance...")
-            all_prices = []
-            failed = []
-            batch_size = 30
 
-            for i in range(0, len(tickers), batch_size):
-                batch = tickers[i : i + batch_size]
-                try:
-                    raw = yf.download(
-                        batch, start=START_DATE, end=END_DATE,
-                        auto_adjust=True, progress=False, threads=True,
-                    )
-                    if isinstance(raw.columns, pd.MultiIndex):
-                        close = raw["Close"]
-                    else:
-                        close = raw[["Close"]] if "Close" in raw.columns else raw
-                    all_prices.append(close)
-                except Exception:
-                    failed.extend(batch)
-                time.sleep(0.5)
-
-            prices_daily = pd.concat(all_prices, axis=1)
-            prices_daily = prices_daily.loc[:, ~prices_daily.columns.duplicated()]
-            prices_monthly = prices_daily.resample("ME").last()
-            returns_monthly = prices_monthly.pct_change().dropna(how="all")
-            threshold = int(0.80 * len(returns_monthly))
-            returns_monthly = returns_monthly.dropna(axis=1, thresh=threshold)
-
-            st.write(f"Loaded {returns_monthly.shape[1]} assets over {returns_monthly.shape[0]} months")
-
-            # ── Align Aberdeen ───────────────────────────────────────────────
-            target_dates = returns_monthly.index
-            n_align = min(len(ABERDEEN_MONTHLY), len(target_dates))
-            y = pd.Series(
-                ABERDEEN_MONTHLY[-n_align:],
-                index=target_dates[-n_align:],
-                name="Aberdeen",
-            )
-            X_raw = returns_monthly.loc[y.index].copy()
-            X_raw = X_raw.dropna(axis=1, thresh=int(0.90 * len(y)))
-            X_raw = X_raw.fillna(X_raw.median())
-
-            # ── Correlations ─────────────────────────────────────────────────
-            corr_raw = X_raw.corrwith(y).abs().sort_values(ascending=False)
-
-            # ── Feature engineering ──────────────────────────────────────────
-            st.write("Engineering features (lags, rolling, interactions)...")
-            X_enrich = X_raw.copy()
-            for col in X_raw.columns:
-                X_enrich[f"{col}_lag1"] = X_raw[col].shift(1)
-                X_enrich[f"{col}_lag2"] = X_raw[col].shift(2)
-            for col in corr_raw.head(25).index:
-                X_enrich[f"{col}_ma3"] = X_raw[col].rolling(3).mean()
-                X_enrich[f"{col}_ma6"] = X_raw[col].rolling(6).mean()
-            for col in corr_raw.head(15).index:
-                X_enrich[f"{col}_vol3"] = X_raw[col].rolling(3).std()
-            for col in corr_raw.head(25).index:
-                X_enrich[f"{col}_sq"] = X_raw[col] ** 2
-            top_interact = corr_raw.head(12).index.tolist()
-            for a, b in itertools.combinations(top_interact, 2):
-                X_enrich[f"{a}x{b}"] = X_raw[a] * X_raw[b]
-
-            X_enrich = X_enrich.dropna()
-            y_enrich = y.loc[X_enrich.index]
-            n_raw = X_enrich.shape[1]
-
-            # Dedup
-            corr_matrix = X_enrich.corr().abs()
-            upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-            to_drop = set()
-            for col in upper.columns:
-                highly_corr = upper.index[upper[col] > dedup_corr].tolist()
-                if highly_corr:
-                    candidates = [col] + highly_corr
-                    corrs_y = {c: abs(X_enrich[c].corr(y_enrich)) for c in candidates if c not in to_drop}
-                    if corrs_y:
-                        keep = max(corrs_y, key=corrs_y.get)
-                        to_drop.update(c for c in candidates if c != keep)
-            X_enrich = X_enrich.drop(columns=list(to_drop))
-
-            st.write(f"{n_raw} features -> {X_enrich.shape[1]} after deduplication")
-
-            # ── PCA ──────────────────────────────────────────────────────────
-            scaler_pca = StandardScaler()
-            X_sc = scaler_pca.fit_transform(X_enrich)
-            n_comp = min(30, X_enrich.shape[1], X_enrich.shape[0] - 1)
-            pca = PCA(n_components=n_comp)
-            pca_scores = pca.fit_transform(X_sc)
-            for i in range(n_comp):
-                X_enrich[f"PC{i+1}"] = pca_scores[:, i]
-
-            # ── Forward stepwise ─────────────────────────────────────────────
-            st.write("Running forward stepwise selection...")
-            remaining = list(X_enrich.columns)
-            selected = []
-            best_r2 = 0.0
-            history = []
-
-            for step in range(max_factors):
-                best_new = None
-                best_new_r2 = best_r2
-                best_p = 1.0
-                for cand in remaining:
-                    try:
-                        res = sm.OLS(y_enrich, sm.add_constant(X_enrich[selected + [cand]])).fit()
-                        pval = float(res.pvalues.get(cand, 1.0))
-                        if res.rsquared_adj > best_new_r2 and pval < p_threshold:
-                            best_new_r2 = res.rsquared_adj
-                            best_new = cand
-                            best_p = pval
-                    except Exception:
-                        continue
-                if best_new is None:
-                    break
-                selected.append(best_new)
-                remaining.remove(best_new)
-                best_r2 = best_new_r2
-                history.append({
-                    "step": step + 1, "factor": best_new,
-                    "r2_adj": best_new_r2, "p_value": best_p,
-                })
-                if best_r2 >= target_r2:
-                    break
-
-            # ── Final OLS ────────────────────────────────────────────────────
-            st.write("Fitting final OLS model...")
-            X_final = sm.add_constant(X_enrich[selected])
-            model = sm.OLS(y_enrich, X_final).fit()
-            y_hat = model.fittedvalues.rename("Clone")
-            resid = model.resid
-
-            # Diagnostics
-            dw = durbin_watson(resid)
-            _, bp_p, _, _ = het_breuschpagan(resid, X_final)
-            jb_stat, jb_p = stats.jarque_bera(resid)
-            vif_vals = []
-            for i in range(X_final.shape[1]):
-                vif_vals.append(variance_inflation_factor(X_final.values, i))
-            vif_df = pd.DataFrame({"Variable": X_final.columns, "VIF": vif_vals})
-            vif_df = vif_df[vif_df["Variable"] != "const"]
-
-            params = model.params.drop("const")
-            weights = params / params.abs().sum() * 100
-
-            status.update(label="Analysis complete!", state="complete")
-
-        # Store in session
-        st.session_state["results"] = {
-            "y": y_enrich, "y_hat": y_hat, "model": model,
-            "selected": selected, "history": pd.DataFrame(history),
-            "corr_raw": corr_raw, "params": params, "weights": weights,
-            "resid": resid, "dw": dw, "bp_p": bp_p, "jb_p": jb_p,
-            "vif_df": vif_df, "X_raw": X_raw,
-        }
-
-    # ── Retrieve results ─────────────────────────────────────────────────
-    R = st.session_state["results"]
-    y = R["y"]
-    y_hat = R["y_hat"]
-    model = R["model"]
-    selected = R["selected"]
-    hist_df = R["history"]
-    corr_raw = R["corr_raw"]
-    params = R["params"]
-    weights = R["weights"]
-    resid = R["resid"]
-    dw = R["dw"]
-    bp_p = R["bp_p"]
-    jb_p = R["jb_p"]
-    vif_df = R["vif_df"]
-
-    # ── KPI Cards ────────────────────────────────────────────────────────
-    st.markdown("---")
-    c1, c2, c3, c4, c5 = st.columns(5)
-
-    def metric_card(col, value, label, color="#4fc3f7"):
-        col.markdown(
-            f'<div class="metric-card">'
-            f'<div class="value" style="color:{color}">{value}</div>'
-            f'<div class="label">{label}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    metric_card(c1, f"{model.rsquared_adj*100:.1f}%", "R\u00b2 Adjusted", "#4fc3f7")
-    metric_card(c2, f"{model.rsquared*100:.1f}%", "R\u00b2 Raw", "#81c784")
-    metric_card(c3, f"{len(selected)}", "Factors", "#ffb74d")
-    metric_card(c4, f"{model.f_pvalue:.2e}", "F-test p-value", "#e57373")
-    metric_card(
-        c5,
-        f"{((1 + model.params['const'])**12 - 1)*100:.1f}%",
-        "Annualized Alpha",
-        "#ce93d8",
+def kpi(col, val, lbl, color):
+    col.markdown(
+        f'<div class="kpi"><div class="val" style="color:{color}">{val}</div>'
+        f'<div class="lbl">{lbl}</div></div>',
+        unsafe_allow_html=True,
     )
 
-    st.markdown("")
 
-    # ── Tab layout ───────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Performance", "Factor Analysis", "Diagnostics",
-        "Portfolio", "Stepwise History",
-    ])
+k1, k2, k3, k4, k5, k6 = st.columns(6)
+kpi(k1, f"{model.rsquared_adj * 100:.1f}%", "R\u00b2 Adjusté", "#4fc3f7")
+kpi(k2, f"{model.rsquared * 100:.1f}%", "R\u00b2", "#81c784")
+kpi(k3, f"{len(selected)}", "Factors", "#ffb74d")
+kpi(k4, f"{sharpe(y):.2f}", "HF Sharpe", "#ce93d8")
+kpi(k5, f"{sharpe(y_hat):.2f}", "Cloné Sharpe", "#ff8a65")
+alpha_ann = ((1 + model.params["const"]) ** 12 - 1) * 100
+kpi(k6, f"{alpha_ann:.1f}%", "Ann. Alpha", "#e57373")
 
-    # ────────────────────────────────────────────────────────────────────
-    # TAB 1: PERFORMANCE
-    # ────────────────────────────────────────────────────────────────────
-    with tab1:
-        col_l, col_r = st.columns([2, 1])
+st.markdown("")
 
-        with col_l:
-            # Cumulative performance
-            cum_hf = (1 + y).cumprod() - 1
-            cum_cl = (1 + y_hat).cumprod() - 1
+# ── Charts ───────────────────────────────────────────────────────────────────
 
-            fig_perf = go.Figure()
-            fig_perf.add_trace(go.Scatter(
-                x=cum_hf.index, y=cum_hf.values,
-                name="Aberdeen HF", line=dict(color="#4fc3f7", width=2.5),
-                fill="tonexty" if False else None,
-            ))
-            fig_perf.add_trace(go.Scatter(
-                x=cum_cl.index, y=cum_cl.values,
-                name="OLS Clone", line=dict(color="#ff8a65", width=2, dash="dash"),
-            ))
-            # Fill between
-            fig_perf.add_trace(go.Scatter(
-                x=list(cum_hf.index) + list(cum_cl.index[::-1]),
-                y=list(cum_hf.values) + list(cum_cl.values[::-1]),
-                fill="toself", fillcolor="rgba(255,138,101,0.08)",
-                line=dict(width=0), showlegend=False, hoverinfo="skip",
-            ))
-            fig_perf.update_layout(
-                title="Cumulative Performance",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                yaxis_tickformat=".0%",
-                height=420,
-                legend=dict(x=0.02, y=0.98),
-                margin=dict(l=60, r=20, t=50, b=40),
-            )
-            st.plotly_chart(fig_perf, use_container_width=True)
+# Row 1: Cumulative performance + Scatter
+col1, col2 = st.columns(2)
 
-        with col_r:
-            st.markdown("### Performance Comparison")
-            perf_data = {
-                "Metric": [
-                    "Annualized Return", "Annualized Volatility",
-                    "Sharpe Ratio", "Max Drawdown", "Skewness", "Kurtosis",
-                ],
-                "Aberdeen HF": [
-                    f"{ann_ret(y)*100:.2f}%", f"{ann_vol(y)*100:.2f}%",
-                    f"{sharpe(y):.2f}", f"{max_dd(y)*100:.2f}%",
-                    f"{y.skew():.3f}", f"{y.kurt():.3f}",
-                ],
-                "OLS Clone": [
-                    f"{ann_ret(y_hat)*100:.2f}%", f"{ann_vol(y_hat)*100:.2f}%",
-                    f"{sharpe(y_hat):.2f}", f"{max_dd(y_hat)*100:.2f}%",
-                    f"{y_hat.skew():.3f}", f"{y_hat.kurt():.3f}",
-                ],
-            }
-            st.dataframe(
-                pd.DataFrame(perf_data).set_index("Metric"),
-                use_container_width=True,
-            )
+with col1:
+    cum_hf = (1 + y).cumprod() - 1
+    cum_cl = (1 + y_hat).cumprod() - 1
 
-            # Monthly returns distribution
-            fig_dist = go.Figure()
-            fig_dist.add_trace(go.Histogram(
-                x=y.values, name="Aberdeen", opacity=0.7,
-                marker_color="#4fc3f7", nbinsx=20,
-            ))
-            fig_dist.add_trace(go.Histogram(
-                x=y_hat.values, name="Clone", opacity=0.7,
-                marker_color="#ff8a65", nbinsx=20,
-            ))
-            fig_dist.update_layout(
-                title="Monthly Returns Distribution",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                barmode="overlay",
-                xaxis_tickformat=".1%",
-                height=250,
-                margin=dict(l=40, r=20, t=40, b=30),
-                showlegend=False,
-            )
-            st.plotly_chart(fig_dist, use_container_width=True)
-
-        # Scatter plot
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            fig_scatter = go.Figure()
-            fig_scatter.add_trace(go.Scatter(
-                x=y_hat.values, y=y.values, mode="markers",
-                marker=dict(
-                    color=y.values, colorscale="RdYlBu", size=8,
-                    line=dict(width=0.5, color="white"),
-                    colorbar=dict(title="HF Return"),
-                ),
-                text=[d.strftime("%Y-%m") for d in y.index],
-                hovertemplate="Clone: %{x:.2%}<br>HF: %{y:.2%}<br>%{text}<extra></extra>",
-            ))
-            # Regression line
-            z = np.polyfit(y_hat.values, y.values, 1)
-            xl = np.linspace(y_hat.min(), y_hat.max(), 100)
-            fig_scatter.add_trace(go.Scatter(
-                x=xl, y=np.poly1d(z)(xl),
-                mode="lines", line=dict(color="#ff8a65", width=2, dash="dash"),
-                showlegend=False,
-            ))
-            fig_scatter.update_layout(
-                title=f"HF vs Clone Returns (R\u00b2 = {model.rsquared:.3f})",
-                xaxis_title="Clone Return", yaxis_title="HF Return",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                xaxis_tickformat=".1%", yaxis_tickformat=".1%",
-                height=380,
-                margin=dict(l=60, r=20, t=50, b=50),
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
-
-        with col_s2:
-            # Rolling 12m correlation
-            rolling_corr = y.rolling(12).corr(y_hat)
-            fig_rcorr = go.Figure()
-            fig_rcorr.add_trace(go.Scatter(
-                x=rolling_corr.index, y=rolling_corr.values,
-                fill="tozeroy", fillcolor="rgba(79,195,247,0.15)",
-                line=dict(color="#4fc3f7", width=2),
-            ))
-            fig_rcorr.add_hline(y=rolling_corr.mean(), line_dash="dash",
-                                line_color="#ff8a65", annotation_text=f"Mean: {rolling_corr.mean():.2f}")
-            fig_rcorr.update_layout(
-                title="Rolling 12-Month Correlation (HF vs Clone)",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                height=380, yaxis_range=[-0.5, 1],
-                margin=dict(l=60, r=20, t=50, b=40),
-            )
-            st.plotly_chart(fig_rcorr, use_container_width=True)
-
-
-    # ────────────────────────────────────────────────────────────────────
-    # TAB 2: FACTOR ANALYSIS
-    # ────────────────────────────────────────────────────────────────────
-    with tab2:
-        col_coef, col_corr = st.columns([3, 2])
-
-        with col_coef:
-            # Coefficient table
-            st.markdown("### OLS Coefficients")
-            ci = model.conf_int()
-            coef_data = []
-            for var in model.params.index:
-                pval = model.pvalues[var]
-                sig = "***" if pval < 0.01 else ("**" if pval < 0.05 else ("*" if pval < 0.10 else ""))
-                coef_data.append({
-                    "Variable": "Intercept" if var == "const" else var,
-                    "Coefficient": model.params[var],
-                    "Std Error": model.bse[var],
-                    "t-stat": model.tvalues[var],
-                    "p-value": pval,
-                    "Sig.": sig,
-                })
-            coef_df = pd.DataFrame(coef_data)
-            st.dataframe(
-                coef_df.style.format({
-                    "Coefficient": "{:.6f}", "Std Error": "{:.6f}",
-                    "t-stat": "{:.3f}", "p-value": "{:.6f}",
-                }).background_gradient(subset=["p-value"], cmap="RdYlGn", vmin=0, vmax=0.15),
-                use_container_width=True, height=500,
-            )
-
-        with col_corr:
-            # Top correlations
-            st.markdown("### Top Raw Correlations with Fund")
-            top_corr = corr_raw.head(20)
-            fig_corr = go.Figure(go.Bar(
-                x=top_corr.values, y=top_corr.index,
-                orientation="h",
-                marker=dict(
-                    color=top_corr.values,
-                    colorscale=[[0, "#1a237e"], [0.5, "#4fc3f7"], [1, "#ff8a65"]],
-                ),
-            ))
-            fig_corr.update_layout(
-                title="Absolute Correlation with Aberdeen",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                height=500, yaxis=dict(autorange="reversed"),
-                margin=dict(l=80, r=20, t=50, b=40),
-            )
-            st.plotly_chart(fig_corr, use_container_width=True)
-
-        # ANOVA summary
-        st.markdown("### ANOVA Table")
-        n = int(model.nobs)
-        k = len(selected)
-        ss_tot = float(np.sum((y - y.mean()) ** 2))
-        ss_res = float(np.sum(resid ** 2))
-        ss_reg = ss_tot - ss_res
-        df_reg, df_res = k, n - k - 1
-
-        anova_df = pd.DataFrame({
-            "Source": ["Regression", "Residuals", "Total"],
-            "SS": [ss_reg, ss_res, ss_tot],
-            "df": [df_reg, df_res, n - 1],
-            "MS": [ss_reg / df_reg, ss_res / df_res, np.nan],
-            "F-stat": [model.fvalue, np.nan, np.nan],
-            "p-value": [model.f_pvalue, np.nan, np.nan],
-        })
-        st.dataframe(
-            anova_df.style.format({
-                "SS": "{:.8f}", "MS": "{:.8f}",
-                "F-stat": "{:.4f}", "p-value": "{:.2e}",
-            }, na_rep=""),
-            use_container_width=True,
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=cum_hf.index,
+            y=cum_hf.values,
+            name="Aberdeen HF",
+            line=dict(color="#4fc3f7", width=2.5),
         )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=cum_cl.index,
+            y=cum_cl.values,
+            name="OLS Clone",
+            line=dict(color="#ff8a65", width=2, dash="dash"),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=list(cum_hf.index) + list(cum_cl.index[::-1]),
+            y=list(cum_hf.values) + list(cum_cl.values[::-1]),
+            fill="toself",
+            fillcolor="rgba(79,195,247,0.06)",
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+    fig.update_layout(
+        title="Performance Cumulé: Aberdeen vs Clone",
+        yaxis_tickformat=".0%",
+        height=400,
+        legend=dict(x=0.02, y=0.98),
+        margin=dict(l=50, r=20, t=45, b=35),
+        **DARK,
+    )
+    st.plotly_chart(fig, width="stretch")
 
-
-    # ────────────────────────────────────────────────────────────────────
-    # TAB 3: DIAGNOSTICS
-    # ────────────────────────────────────────────────────────────────────
-    with tab3:
-        # Diagnostic badges
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            ok = 1.5 < dw < 2.5
-            st.metric("Durbin-Watson", f"{dw:.4f}", "PASS" if ok else "FAIL",
-                       delta_color="normal" if ok else "inverse")
-        with d2:
-            ok = bp_p > 0.05
-            st.metric("Breusch-Pagan p", f"{bp_p:.4f}", "PASS" if ok else "FAIL",
-                       delta_color="normal" if ok else "inverse")
-        with d3:
-            ok = jb_p > 0.05
-            st.metric("Jarque-Bera p", f"{jb_p:.4f}", "PASS" if ok else "FAIL",
-                       delta_color="normal" if ok else "inverse")
-
-        col_r1, col_r2 = st.columns(2)
-        with col_r1:
-            # Residual bar chart
-            colors = ["#81c784" if r >= 0 else "#e57373" for r in resid.values]
-            fig_resid = go.Figure(go.Bar(
-                x=resid.index, y=resid.values,
-                marker_color=colors, opacity=0.8,
-            ))
-            fig_resid.add_hline(y=0, line_color="white", line_width=1)
-            fig_resid.update_layout(
-                title="OLS Residuals Over Time",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                yaxis_tickformat=".1%",
-                height=350,
-                margin=dict(l=60, r=20, t=50, b=40),
-            )
-            st.plotly_chart(fig_resid, use_container_width=True)
-
-        with col_r2:
-            # QQ plot
-            (osm, osr), (slope, intercept, _) = stats.probplot(resid, dist="norm")
-            fig_qq = go.Figure()
-            fig_qq.add_trace(go.Scatter(
-                x=osm, y=osr, mode="markers",
-                marker=dict(color="#4fc3f7", size=6, line=dict(width=0.5, color="white")),
-                name="Residuals",
-            ))
-            fig_qq.add_trace(go.Scatter(
-                x=[osm.min(), osm.max()],
-                y=[slope * osm.min() + intercept, slope * osm.max() + intercept],
-                mode="lines", line=dict(color="#ff8a65", dash="dash"),
-                name="Normal line",
-            ))
-            fig_qq.update_layout(
-                title="Q-Q Plot (Normality of Residuals)",
-                xaxis_title="Theoretical Quantiles",
-                yaxis_title="Sample Quantiles",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                height=350,
-                margin=dict(l=60, r=20, t=50, b=50),
-            )
-            st.plotly_chart(fig_qq, use_container_width=True)
-
-        # VIF table
-        st.markdown("### Variance Inflation Factors")
-        vif_styled = vif_df.copy()
-        vif_styled["Status"] = vif_styled["VIF"].apply(lambda v: "OK" if v < 5 else "HIGH")
-        st.dataframe(
-            vif_styled.style.format({"VIF": "{:.2f}"}).applymap(
-                lambda v: "color: #81c784" if v == "OK" else "color: #e57373",
-                subset=["Status"],
+with col2:
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=y_hat.values,
+            y=y.values,
+            mode="markers",
+            marker=dict(
+                color=y.values,
+                colorscale="RdYlBu",
+                size=7,
+                line=dict(width=0.5, color="white"),
             ),
-            use_container_width=True,
+            text=[d.strftime("%Y-%m") for d in y.index],
+            hovertemplate="Clone: %{x:.2%}<br>Aberdeen: %{y:.2%}<br>%{text}<extra></extra>",
         )
-
-
-    # ────────────────────────────────────────────────────────────────────
-    # TAB 4: PORTFOLIO
-    # ────────────────────────────────────────────────────────────────────
-    with tab4:
-        col_w, col_t = st.columns([3, 2])
-
-        with col_w:
-            ws = weights.sort_values()
-            colors_w = ["#1a237e" if v > 0 else "#e65100" for v in ws.values]
-            fig_w = go.Figure(go.Bar(
-                y=ws.index, x=ws.values, orientation="h",
-                marker_color=colors_w, opacity=0.9,
-                text=[f"{v:+.1f}%" for v in ws.values],
-                textposition="outside", textfont=dict(size=11),
-            ))
-            fig_w.add_vline(x=0, line_color="white", line_width=1)
-            fig_w.update_layout(
-                title="Replication Portfolio Weights",
-                xaxis_title="Normalized Weight (%)",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                height=max(400, len(ws) * 28),
-                margin=dict(l=120, r=80, t=50, b=40),
-            )
-            st.plotly_chart(fig_w, use_container_width=True)
-
-        with col_t:
-            st.markdown("### Portfolio Breakdown")
-            port_df = pd.DataFrame({
-                "Factor": params.index,
-                "Beta": params.values,
-                "Weight %": weights.values,
-                "Direction": ["LONG" if w > 0 else "SHORT" for w in weights.values],
-            }).sort_values("Weight %", ascending=False)
-            st.dataframe(
-                port_df.style.format({"Beta": "{:.6f}", "Weight %": "{:+.2f}%"}).applymap(
-                    lambda v: "color: #81c784" if v == "LONG" else "color: #e57373",
-                    subset=["Direction"],
-                ),
-                use_container_width=True, height=500,
-            )
-
-            alpha_m = model.params["const"]
-            st.markdown(
-                f'<div class="highlight-box">'
-                f'<b>Monthly Alpha:</b> {alpha_m*100:.4f}%<br>'
-                f'<b>Annualized Alpha:</b> {((1+alpha_m)**12 - 1)*100:.2f}%<br>'
-                f'<b>R\u00b2 Adjusted:</b> {model.rsquared_adj*100:.2f}%'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-
-    # ────────────────────────────────────────────────────────────────────
-    # TAB 5: STEPWISE HISTORY
-    # ────────────────────────────────────────────────────────────────────
-    with tab5:
-        col_h1, col_h2 = st.columns([3, 2])
-
-        with col_h1:
-            fig_step = make_subplots(specs=[[{"secondary_y": True}]])
-            fig_step.add_trace(go.Scatter(
-                x=hist_df["step"], y=hist_df["r2_adj"],
-                mode="lines+markers",
-                name="R\u00b2 Adjusted",
-                line=dict(color="#4fc3f7", width=3),
-                marker=dict(size=10, symbol="circle"),
-            ), secondary_y=False)
-            fig_step.add_trace(go.Bar(
-                x=hist_df["step"], y=hist_df["p_value"],
-                name="p-value", opacity=0.4,
-                marker_color="#ff8a65",
-            ), secondary_y=True)
-            fig_step.add_hline(
-                y=target_r2, line_dash="dot", line_color="#81c784",
-                annotation_text=f"Target: {target_r2*100:.0f}%",
-                secondary_y=False,
-            )
-            fig_step.update_layout(
-                title="Stepwise Factor Selection Progress",
-                xaxis_title="Step",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                height=450,
-                margin=dict(l=60, r=60, t=50, b=40),
-            )
-            fig_step.update_yaxes(title_text="R\u00b2 Adjusted", tickformat=".0%", secondary_y=False)
-            fig_step.update_yaxes(title_text="p-value", secondary_y=True)
-            st.plotly_chart(fig_step, use_container_width=True)
-
-        with col_h2:
-            st.markdown("### Selection Log")
-            log_df = hist_df.copy()
-            log_df["r2_adj"] = log_df["r2_adj"].map(lambda x: f"{x*100:.2f}%")
-            log_df["p_value"] = log_df["p_value"].map(lambda x: f"{x:.6f}")
-            st.dataframe(log_df, use_container_width=True, height=450)
-
-        # Marginal R2 contribution
-        if len(hist_df) > 1:
-            marginal = hist_df["r2_adj"].diff().fillna(hist_df["r2_adj"].iloc[0])
-            fig_marg = go.Figure(go.Bar(
-                x=hist_df["factor"], y=marginal * 100,
-                marker_color=px.colors.sample_colorscale(
-                    "Viridis", np.linspace(0.2, 0.9, len(marginal))
-                ),
-                text=[f"+{v*100:.2f}%" for v in marginal],
-                textposition="outside",
-            ))
-            fig_marg.update_layout(
-                title="Marginal R\u00b2 Contribution per Factor",
-                yaxis_title="Marginal R\u00b2 adj (%)",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(15,15,35,0.8)",
-                height=350,
-                xaxis_tickangle=-45,
-                margin=dict(l=60, r=20, t=50, b=100),
-            )
-            st.plotly_chart(fig_marg, use_container_width=True)
-
-else:
-    # Landing state
-    st.markdown("---")
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(
-            '<div class="metric-card">'
-            '<div class="value" style="color:#4fc3f7">88</div>'
-            '<div class="label">ETFs in Universe</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    with c2:
-        st.markdown(
-            '<div class="metric-card">'
-            '<div class="value" style="color:#81c784">10</div>'
-            '<div class="label">Asset Classes</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-    with c3:
-        st.markdown(
-            '<div class="metric-card">'
-            '<div class="value" style="color:#ff8a65">119</div>'
-            '<div class="label">Monthly Observations</div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    st.markdown("")
-    st.markdown(
-        '<div class="highlight-box">'
-        '<b>How it works:</b> This engine downloads ~90 ETF/indices via Yahoo Finance, '
-        'engineers 300+ features (lags, rolling averages, quadratics, cross-interactions), '
-        'deduplicates correlated features, then runs a forward stepwise OLS regression '
-        'to find the best factor model that replicates the hedge fund\'s returns.'
-        '</div>',
-        unsafe_allow_html=True,
     )
-
-    st.markdown("")
-    st.markdown(
-        '<p style="text-align:center; opacity:0.5; font-size:1.1rem;">'
-        'Configure parameters in the sidebar, then click <b>Run Clone Analysis</b> to start.'
-        '</p>',
-        unsafe_allow_html=True,
+    z = np.polyfit(y_hat.values, y.values, 1)
+    xl = np.linspace(y_hat.min(), y_hat.max(), 100)
+    fig.add_trace(
+        go.Scatter(
+            x=xl,
+            y=np.poly1d(z)(xl),
+            mode="lines",
+            line=dict(color="#ff8a65", width=2, dash="dash"),
+            showlegend=False,
+        )
     )
+    fig.update_layout(
+        title=f"HF vs Clone monthly returns (R\u00b2 = {model.rsquared:.3f})",
+        xaxis_title="Clone Return",
+        yaxis_title="HF Return",
+        xaxis_tickformat=".1%",
+        yaxis_tickformat=".1%",
+        height=400,
+        margin=dict(l=50, r=20, t=45, b=45),
+        **DARK,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
+# Row 2: Stepwise R2 progression + Portfolio weights
+col3, col4 = st.columns(2)
+
+with col3:
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(
+            x=hist_df["step"],
+            y=hist_df["r2_adj"],
+            mode="lines+markers",
+            name="R\u00b2 adj",
+            line=dict(color="#4fc3f7", width=3),
+            marker=dict(size=8),
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Bar(
+            x=hist_df["step"],
+            y=hist_df["p_value"],
+            name="p-value",
+            opacity=0.3,
+            marker_color="#ff8a65",
+        ),
+        secondary_y=True,
+    )
+    fig.add_hline(
+        y=TARGET_R2,
+        line_dash="dot",
+        line_color="#81c784",
+        annotation_text=f"Target {TARGET_R2 * 100:.0f}%",
+        secondary_y=False,
+    )
+    fig.update_layout(
+        title="Stepwise Selection: R\u00b2 Progression",
+        xaxis_title="Step",
+        height=400,
+        margin=dict(l=50, r=50, t=45, b=35),
+        **DARK,
+    )
+    fig.update_yaxes(title_text="R\u00b2 adj", tickformat=".0%", secondary_y=False)
+    fig.update_yaxes(title_text="p-value", secondary_y=True)
+    st.plotly_chart(fig, width="stretch")
+
+with col4:
+    ws = weights.sort_values()
+    colors_w = ["#4fc3f7" if v > 0 else "#e57373" for v in ws.values]
+    fig = go.Figure(
+        go.Bar(
+            y=ws.index,
+            x=ws.values,
+            orientation="h",
+            marker_color=colors_w,
+            opacity=0.9,
+            text=[f"{v:+.1f}%" for v in ws.values],
+            textposition="outside",
+            textfont=dict(size=10),
+        )
+    )
+    fig.add_vline(x=0, line_color="white", line_width=0.8)
+    fig.update_layout(
+        title="Distribution des poids de chaque actifs (portefeuille cloné)",
+        xaxis_title="Weight (%)",
+        height=400,
+        margin=dict(l=110, r=70, t=45, b=35),
+        **DARK,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+
+# Row 3: Residuals + QQ
+col5, col6 = st.columns(2)
+
+# with col5:
+#     colors_r = ["#81c784" if r >= 0 else "#e57373" for r in resid.values]
+#     fig = go.Figure(
+#         go.Bar(
+#             x=resid.index,
+#             y=resid.values,
+#             marker_color=colors_r,
+#             opacity=0.8,
+#         )
+#     )
+#     fig.add_hline(y=0, line_color="white", line_width=0.8)
+#     fig.update_layout(
+#         title=f"OLS Residuals  |  DW={R['dw']:.2f}  |  BP p={R['bp_p']:.3f}",
+#         yaxis_tickformat=".1%",
+#         height=350,
+#         margin=dict(l=50, r=20, t=45, b=35),
+#         **DARK,
+#     )
+#     st.plotly_chart(fig, width="stretch")
+
+with col6:
+    (osm, osr), (slope, intercept, _) = stats.probplot(resid, dist="norm")
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=osm,
+            y=osr,
+            mode="markers",
+            marker=dict(color="#4fc3f7", size=6, line=dict(width=0.5, color="white")),
+            name="Residuals",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[osm.min(), osm.max()],
+            y=[slope * osm.min() + intercept, slope * osm.max() + intercept],
+            mode="lines",
+            line=dict(color="#ff8a65", dash="dash"),
+            name="Normal",
+        )
+    )
+    fig.update_layout(
+        title=f"Q-Q Plot  |  Jarque-Bera p={R['jb_p']:.3f}",
+        xaxis_title="Theoretical Quantiles",
+        yaxis_title="Sample Quantiles",
+        height=350,
+        margin=dict(l=50, r=20, t=45, b=45),
+        **DARK,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+# ── Performance table ────────────────────────────────────────────────────────
+st.markdown("---")
+tc1, tc2 = st.columns(2)
+
+with tc1:
+    st.markdown("### HF vs Clone")
+    perf = pd.DataFrame(
+        {
+            "": ["Ann. Return", "Ann. Volatility", "Sharpe Ratio", "Max Drawdown"],
+            "Aberdeen HF": [
+                f"{ann_ret(y) * 100:.2f}%",
+                f"{ann_vol(y) * 100:.2f}%",
+                f"{sharpe(y):.2f}",
+                f"{max_dd(y) * 100:.2f}%",
+            ],
+            "OLS Clone": [
+                f"{ann_ret(y_hat) * 100:.2f}%",
+                f"{ann_vol(y_hat) * 100:.2f}%",
+                f"{sharpe(y_hat):.2f}",
+                f"{max_dd(y_hat) * 100:.2f}%",
+            ],
+        }
+    ).set_index("")
+    st.dataframe(perf, width="stretch")
+
+with tc2:
+    st.markdown("### OLS Diagnostics")
+    dw_ok = 1.5 < R["dw"] < 2.5
+    bp_ok = R["bp_p"] > 0.05
+    jb_ok = R["jb_p"] > 0.05
+    diag = pd.DataFrame(
+        {
+            "Test": ["Durbin-Watson", "Breusch-Pagan", "Jarque-Bera"],
+            "Value": [f"{R['dw']:.4f}", f"{R['bp_p']:.4f}", f"{R['jb_p']:.4f}"],
+            "Threshold": ["1.5 - 2.5", "> 0.05", "> 0.05"],
+            "Result": [
+                "PASS" if dw_ok else "FAIL",
+                "PASS" if bp_ok else "FAIL",
+                "PASS" if jb_ok else "FAIL",
+            ],
+        }
+    ).set_index("Test")
+    st.dataframe(diag, width="stretch")
